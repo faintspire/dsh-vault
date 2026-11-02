@@ -31,6 +31,8 @@
 
 ```powershell
 git clone https://github.com/faintspire/dsh-vault.git
+# 国内走 HTTPS 连 GitHub 常被 reset，SSH 更稳：
+# git clone git@github.com:faintspire/dsh-vault.git
 cd dsh-vault
 node scripts/install.mjs --profile desktop
 ```

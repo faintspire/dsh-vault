@@ -31,6 +31,8 @@ One target, one repository: skills to `dsh-skills`, memory to `dsh-memory`, MCP 
 
 ```powershell
 git clone https://github.com/faintspire/dsh-vault.git
+# Over HTTPS GitHub is often reset from mainland China; SSH is steadier:
+# git clone git@github.com:faintspire/dsh-vault.git
 cd dsh-vault
 node scripts/install.mjs --profile desktop
 ```
