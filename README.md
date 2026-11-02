@@ -39,6 +39,30 @@ node scripts/install.mjs --profile desktop
 
 脚本会：在 profile 的 `dependencies` 写 `link:` 指向本目录、把 `dsh-vault` 加进 `dsh.profile.bundles`、在 `node_modules` 下建 junction（Windows）或 symlink。**新增 bundle 要重启 DSH 才生效。**
 
+## 面板
+
+装好后左侧栏多一行「云端备份」，点进去是：
+
+- 每个 target 的仓库地址、分支、上次同步状态和条数
+- 「立即同步」按钮（单个 target，或一次全部）
+- 自动同步开关 + 每天几点
+- 「保存配置」：写回插件自己的 `cordis.patch.yml`，写入前自动备份成 `.bak-<时间戳>`
+
+数据源目录（`skills` / `dirs` / `files`）**不在面板里改**，避免手滑删掉备份范围，仍然写在配置文件里。
+
+面板背后是宿主自己的 `webServer`，三个接口：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/dsh-vault/state` | 当前配置 + 上次结果 + 下次同步时间 |
+| POST | `/api/dsh-vault/sync` | 触发同步，body 可带 `{ "target": "memory" }` |
+| POST | `/api/dsh-vault/config` | 保存仓库地址 / 分支 / 时间 / 开关 |
+
+两个 POST 只接受本机回环请求，非法输入（比如时间写成 `99:99`）返回 400 并保持原配置不动。
+
+> 面板属于客户端半边，第一次装上（或改了 `dsh.client`）要重启一次 DSH —— 客户端资源清单是启动时生成的。之后改代码走 HMR。
+
+
 ## 配置
 
 编辑本目录的 `cordis.patch.yml`（配置就是插件的 bundle patch，改完 HMR 生效）：

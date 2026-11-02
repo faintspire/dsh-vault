@@ -1,8 +1,8 @@
 {
   "name": "dsh-vault",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Back up your DSH skills, memory and MCP configs into private Git repositories — daily or on demand.",
+  "description": "Back up your DSH skills, memory and MCP configs into private Git repositories — with a settings panel, daily schedule or on demand.",
   "type": "module",
   "license": "MIT",
   "author": "faintspire",
@@ -31,10 +31,13 @@
     "dsh-vault": "./index.js"
   },
   "exports": {
-    ".": "./index.js"
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "lib/",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
@@ -50,6 +53,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "platform": "web"
     }
   }
 }

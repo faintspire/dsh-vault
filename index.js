@@ -15,7 +15,8 @@ import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-const VERSION = '0.3.0'
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const VERSION = '0.4.0'
 
 const DEFAULTS = {
   schedule: { enabled: false, time: '03:30' },
@@ -484,7 +485,9 @@ function msUntil(time) {
 
 let running = null
 
-async function guardedRun(cfg, reason, log) {
+async function guardedRun(ref, reason, log) {
+  // ref.cfg 是活的引用：面板改完配置立刻生效，不必等下一次 HMR 重载。
+  const cfg = ref.cfg
   if (!cfg.targets.some((t) => t.repo.url)) return { status: 'unconfigured', targets: [] }
   if (running) {
     log('上一次同步还没结束，本次跳过')
@@ -521,7 +524,7 @@ function summarize(result) {
     .join('\n')
 }
 
-async function registerTools(ctx, cfg, log) {
+async function registerTools(ctx, ref, log) {
   if (!ctx?.tools || typeof ctx.tools.register !== 'function') return
   let defineTool = null
   try {
@@ -531,7 +534,7 @@ async function registerTools(ctx, cfg, log) {
     defineTool = (options) => options
   }
 
-  const names = cfg.targets.map((t) => t.name)
+  const names = ref.cfg.targets.map((t) => t.name)
 
   const syncTool = defineTool({
     name: 'vault_sync',
@@ -558,7 +561,7 @@ async function registerTools(ctx, cfg, log) {
     },
     async execute(args) {
       const only = names.includes(args?.target) ? args.target : null
-      const result = await guardedRun(cfg, 'manual', log)
+      const result = await guardedRun(ref, 'manual', log)
       const picked = only ? result.targets.filter((t) => t.name === only) : result.targets
       const failed = picked.find((t) => t.status === 'failed')
       return { status: failed ? 'failed' : result.status, summary: summarize({ ...result, targets: picked }), error: failed?.error || '' }
@@ -594,6 +597,7 @@ async function registerTools(ctx, cfg, log) {
     },
     async execute() {
       const state = readState() || {}
+      const cfg = ref.cfg
       const anyConfigured = cfg.targets.some((t) => t.repo.url)
       const nextRunAt = cfg.schedule.enabled && anyConfigured ? new Date(Date.now() + msUntil(cfg.schedule.time)).toISOString() : ''
       return {
@@ -619,8 +623,9 @@ async function registerTools(ctx, cfg, log) {
 export function apply(ctx, config) {
   let timer = null
   let stopped = false
-  let cfg
+  let reschedule = () => {}
   const log = (message) => console.log(`[vault] ${message}`)
+  let cfg
   try {
     cfg = normalizeConfig(config || {})
   } catch (err) {
@@ -629,22 +634,31 @@ export function apply(ctx, config) {
     return
   }
 
+  // 面板写回配置后改的就是 ref.cfg：定时器和 agent 工具都读这份活引用。
+  const ref = { cfg }
+
   const scheduleNext = () => {
-    if (stopped || !cfg.schedule.enabled) return
-    if (!cfg.targets.some((t) => t.repo.url)) return
-    const delay = msUntil(cfg.schedule.time)
+    if (stopped || !ref.cfg.schedule.enabled) return
+    if (!ref.cfg.targets.some((t) => t.repo.url)) return
+    const delay = msUntil(ref.cfg.schedule.time)
     timer = setTimeout(async () => {
-      await guardedRun(cfg, 'schedule', log)
+      await guardedRun(ref, 'schedule', log)
       scheduleNext()
     }, delay)
     if (typeof timer.unref === 'function') timer.unref()
-    log(`定时同步已开启，每天 ${cfg.schedule.time}（下次 ${new Date(Date.now() + delay).toLocaleString()}）`)
+    log(`定时同步已开启，每天 ${ref.cfg.schedule.time}（下次 ${new Date(Date.now() + delay).toLocaleString()}）`)
+  }
+  reschedule = () => {
+    if (timer) clearTimeout(timer)
+    timer = null
+    if (!stopped) scheduleNext()
   }
 
-  if (!cfg.targets.some((t) => t.repo.url)) log('仓库地址还没配，定时同步不启动（补上配置后重启生效）')
+  if (!ref.cfg.targets.some((t) => t.repo.url)) log('仓库地址还没配，定时同步不启动（补上配置后重启生效）')
   else scheduleNext()
 
-  registerTools(ctx, cfg, log).catch((err) => console.warn(`[vault] 工具注册跳过: ${err && err.message}`))
+  registerTools(ctx, ref, log).catch((err) => console.warn(`[vault] 工具注册跳过: ${err && err.message}`))
+  mountPanel(ctx, ref, log, reschedule)
 
   const stop = () => {
     stopped = true
@@ -652,6 +666,270 @@ export function apply(ctx, config) {
   }
   if (typeof ctx?.effect === 'function') ctx.effect(() => stop)
   else process.on('exit', stop)
+}
+
+// ---------------------------------------------------------------- 面板接口
+
+const API = {
+  state: '/api/dsh-vault/state',
+  sync: '/api/dsh-vault/sync',
+  config: '/api/dsh-vault/config',
+}
+
+function writeJson(res, status, value) {
+  const body = JSON.stringify(value)
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(body)
+}
+
+/** 只有本机能改配置、能触发同步：面板是同源页面，远端配对设备不该有这两个能力。 */
+function isLoopback(req) {
+  const addr = String(req.socket?.remoteAddress || '')
+  return addr === '::1' || addr.startsWith('127.') || addr.startsWith('::ffff:127.')
+}
+
+function readJsonBody(req, limit = 256 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        reject(new Error('请求体过大'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8')
+      if (!text.trim()) return resolve({})
+      try {
+        resolve(JSON.parse(text))
+      } catch {
+        reject(new Error('请求体不是合法 JSON'))
+      }
+    })
+    req.on('error', reject)
+  })
+}
+
+const yamlString = (value) => `'${String(value).replace(/'/g, "''")}'`
+
+/** 面板保存时重新生成 bundle patch；结构固定，所以不需要通用 YAML 库。 */
+function emitPatch(cfg) {
+  const lines = [
+    '# 由 dsh-vault 面板生成，也可以手改（改完 HMR 生效）。',
+    '- insert:',
+    '    - id: vault',
+    "      name: 'dsh-vault'",
+    '      config:',
+    '        targets:',
+  ]
+  for (const target of cfg.targets) {
+    lines.push(`          - name: ${yamlString(target.name)}`)
+    lines.push('            repo:')
+    lines.push(`              url: ${yamlString(target.repo.url)}`)
+    lines.push(`              branch: ${yamlString(target.repo.branch)}`)
+    lines.push(`              workdir: ${yamlString(target.repo.workdir)}`)
+    if (target.skills.length) {
+      lines.push('            skills:')
+      for (const item of target.skills) lines.push(`              - ${yamlString(item)}`)
+    }
+    if (target.dirs.length) {
+      lines.push('            dirs:')
+      for (const item of target.dirs) lines.push(`              - ${yamlString(item)}`)
+    }
+    if (target.files.length) {
+      lines.push('            files:')
+      for (const item of target.files) lines.push(`              - ${yamlString(item)}`)
+    }
+    if (!target.skills.length && !target.dirs.length && !target.files.length) lines.push('            files: []')
+  }
+  lines.push('        schedule:')
+  lines.push(`          enabled: ${cfg.schedule.enabled ? 'true' : 'false'}`)
+  lines.push(`          time: ${yamlString(cfg.schedule.time)}`)
+  lines.push(`        secretPolicy: ${yamlString(cfg.secretPolicy)}`)
+  lines.push(`        maxFileBytes: ${cfg.maxFileBytes}`)
+  return lines.join('\n') + '\n'
+}
+
+function panelState(ref) {
+  const cfg = ref.cfg
+  const state = readState() || {}
+  const anyConfigured = cfg.targets.some((t) => t.repo.url)
+  return {
+    targets: cfg.targets.map((target) => ({
+      name: target.name,
+      url: displayUrl(target.repo.url),
+      branch: target.repo.branch,
+      workdir: target.repo.workdir,
+      sources: target.skills.length + target.dirs.length + target.files.length,
+      count: typeof state[target.name]?.count === 'number' ? state[target.name].count : null,
+      status: state[target.name]?.status || '',
+      error: state[target.name]?.error || '',
+    })),
+    schedule: { enabled: cfg.schedule.enabled, time: cfg.schedule.time },
+    nextRunAt: cfg.schedule.enabled && anyConfigured ? new Date(Date.now() + msUntil(cfg.schedule.time)).toISOString() : '',
+    lastRunAt: state.lastRunAt || '',
+    lastStatus: state.lastStatus || '',
+    lastError: state.lastError || '',
+    secretPolicy: cfg.secretPolicy,
+    busy: running !== null,
+  }
+}
+
+/** 面板编辑只改「仓库地址 / 分支 / 时间 / 开关」，数据源目录由配置文件决定，避免误删。 */
+function validatePanelInput(body) {
+  for (const row of Array.isArray(body?.repos) ? body.repos : []) {
+    const url = String(row?.url ?? '').trim()
+    if (url && (/\s/.test(url) || !/[:/]/.test(url))) {
+      throw new Error(`仓库地址看起来不对：${url}`)
+    }
+    const branch = String(row?.branch ?? '').trim()
+    if (branch && /\s/.test(branch)) throw new Error(`分支名不能带空格：${branch}`)
+  }
+  const time = body?.schedule?.time
+  if (time !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(time))) {
+    throw new Error(`时间要写成 HH:mm（00:00–23:59），收到 ${JSON.stringify(time)}`)
+  }
+}
+
+function mergePanelConfig(ref, body) {
+  const byName = new Map((Array.isArray(body?.repos) ? body.repos : []).map((row) => [String(row?.name || ''), row]))
+  const targets = ref.cfg.targets.map((target) => {
+    const row = byName.get(target.name) || {}
+    return {
+      name: target.name,
+      repo: {
+        url: typeof row.url === 'string' && row.url.trim() ? row.url.trim() : target.repo.url,
+        branch: typeof row.branch === 'string' && row.branch.trim() ? row.branch.trim() : target.repo.branch,
+        workdir: target.repo.workdir,
+        remote: target.repo.remote,
+        token: target.repo.token,
+      },
+      skills: target.skills,
+      dirs: target.dirs,
+      files: target.files,
+    }
+  })
+  return {
+    targets,
+    schedule: {
+      enabled: body?.schedule?.enabled === true,
+      time: typeof body?.schedule?.time === 'string' ? body.schedule.time : ref.cfg.schedule.time,
+    },
+    secretPolicy: ['block', 'mask'].includes(body?.secretPolicy) ? body.secretPolicy : ref.cfg.secretPolicy,
+    maxFileBytes: ref.cfg.maxFileBytes,
+  }
+}
+
+function panelRoutes(ref, log, reschedule) {
+  return [
+    {
+      kind: 'exact',
+      path: API.state,
+      handler: async (req, res) => {
+        if (req.method !== 'GET') return writeJson(res, 405, { error: 'method not allowed' })
+        try {
+          writeJson(res, 200, panelState(ref))
+        } catch (err) {
+          writeJson(res, 500, { error: String(err && err.message ? err.message : err) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: API.sync,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return writeJson(res, 405, { error: 'method not allowed' })
+        if (!isLoopback(req)) return writeJson(res, 403, { error: 'only the local machine may trigger a sync' })
+        let body = {}
+        try {
+          body = await readJsonBody(req)
+        } catch (err) {
+          return writeJson(res, 400, { error: String(err.message) })
+        }
+        const wanted = typeof body?.target === 'string' ? body.target : null
+        const result = await guardedRun(ref, 'panel', log)
+        const picked = wanted ? result.targets.filter((t) => t.name === wanted) : result.targets
+        writeJson(res, 200, {
+          status: result.status,
+          summary: summarize({ ...result, targets: picked }),
+          targets: picked,
+          state: panelState(ref),
+        })
+      },
+    },
+    {
+      kind: 'exact',
+      path: API.config,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return writeJson(res, 405, { error: 'method not allowed' })
+        if (!isLoopback(req)) return writeJson(res, 403, { error: 'only the local machine may change the config' })
+        let body = {}
+        try {
+          body = await readJsonBody(req)
+        } catch (err) {
+          return writeJson(res, 400, { error: String(err.message) })
+        }
+        let next
+        try {
+          validatePanelInput(body)
+          next = normalizeConfig(mergePanelConfig(ref, body))
+        } catch (err) {
+          return writeJson(res, 400, { error: String(err && err.message ? err.message : err) })
+        }
+        const file = path.join(HERE, 'cordis.patch.yml')
+        try {
+          if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak-${Date.now()}`)
+          fs.writeFileSync(file, emitPatch(next), 'utf8')
+        } catch (err) {
+          return writeJson(res, 500, { error: `写配置失败: ${err && err.message}` })
+        }
+        ref.cfg = next
+        reschedule()
+        log('配置已保存（立即生效）')
+        writeJson(res, 200, { ok: true, state: panelState(ref) })
+      },
+    },
+  ]
+}
+
+function mountPanel(ctx, ref, log, reschedule) {
+  let webServer
+  try {
+    webServer = typeof ctx?.get === 'function' ? ctx.get('webServer') : undefined
+  } catch {
+    webServer = undefined
+  }
+  if (!webServer) {
+    try {
+      webServer = ctx?.webServer
+    } catch {
+      webServer = undefined
+    }
+  }
+  if (!webServer || typeof webServer.register !== 'function') {
+    log('宿主没有 webServer 服务，面板接口未挂载（CLI 仍可用）')
+    return
+  }
+  const disposers = []
+  try {
+    for (const route of panelRoutes(ref, log, reschedule)) disposers.push(webServer.register(route))
+  } catch (err) {
+    console.warn(`[vault] 面板路由注册失败: ${err && err.message}`)
+    return
+  }
+  const dispose = () => {
+    for (const d of disposers.splice(0)) {
+      try {
+        d()
+      } catch {}
+    }
+  }
+  if (typeof ctx?.effect === 'function') ctx.effect(() => dispose)
+  log(`面板接口已挂载: ${API.state}`)
 }
 
 // ---------------------------------------------------------------- CLI

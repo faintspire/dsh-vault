@@ -1,23 +1,18 @@
+# 由 dsh-vault 面板生成，也可以手改（改完 HMR 生效）。
 - insert:
     - id: vault
       name: 'dsh-vault'
       config:
-        # 每个 target = 一个私有仓库 + 一个被管理的子目录（<name>/）。
         targets:
-          # 技能包：技能根目录下每个含 SKILL.md 的直接子目录。
-          - name: skills
+          - name: 'skills'
             repo:
               url: 'git@github.com:faintspire/dsh-skills.git'
               branch: 'main'
-              # 本地克隆目录：插件在这里 commit + push。
               workdir: 'C:\Users\liuzk\.dsh\vault\dsh-skills'
             skills:
               - 'C:\Users\liuzk\.dsh\skills'
               - 'C:\Users\liuzk\.agents\skills'
-
-          # 记忆：用户画像 + 工作记忆 + 项目文档，整棵目录照搬。
-          # 注意不要加 .mnemon\skills（那是评测轨迹，几十 MB 且只对本机有意义）。
-          - name: memory
+          - name: 'memory'
             repo:
               url: 'git@github.com:faintspire/dsh-memory.git'
               branch: 'main'
@@ -25,20 +20,14 @@
             dirs:
               - 'C:\Users\liuzk\.mnemon\runtime'
               - 'C:\Users\liuzk\.mnemon\documents'
-
-          # MCP 配置：目前还没有，files 留空即可，仓库会保持空转。
-          - name: mcp
+          - name: 'mcp'
             repo:
               url: 'git@github.com:faintspire/dsh-mcp.git'
               branch: 'main'
               workdir: 'C:\Users\liuzk\.dsh\vault\dsh-mcp'
             files: []
-
         schedule:
           enabled: true
-          # 24 小时制 HH:mm，每天这个点同步一次。
           time: '03:30'
-        # block：发现疑似密钥就中止该仓库的推送；mask：替换成 [REDACTED:xxx] 后继续。
         secretPolicy: 'block'
-        # 单文件上限，超过直接跳过。
         maxFileBytes: 1048576

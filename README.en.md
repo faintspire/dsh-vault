@@ -39,6 +39,30 @@ node scripts/install.mjs --profile desktop
 
 The script adds a `link:` dependency, appends `dsh-vault` to `dsh.profile.bundles`, and creates a junction (Windows) or symlink under `node_modules`. **A new bundle only loads after restarting DSH.**
 
+## Panel
+
+Once installed, a **Cloud backup** row appears in the sidebar:
+
+- repo URL, branch, last status and item count per target
+- a **Sync now** button, per target or for everything
+- the daily-schedule switch and time
+- **Save**: writes back to the plugin's own `cordis.patch.yml`, keeping a `.bak-<timestamp>` copy
+
+Source directories (`skills` / `dirs` / `files`) are deliberately **not** editable in the panel — that keeps a slip of the mouse from emptying the backup set. They stay in the config file.
+
+Behind the panel are three routes on the host's own `webServer`:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/dsh-vault/state` | config, last result, next run |
+| POST | `/api/dsh-vault/sync` | run a sync, body may carry `{ "target": "memory" }` |
+| POST | `/api/dsh-vault/config` | save URLs / branches / time / switch |
+
+Both POST routes accept loopback requests only, and invalid input (say a time of `99:99`) returns 400 without touching the stored config.
+
+> The panel is the client half; the first install (or any change to `dsh.client`) needs one DSH restart, because the client asset roster is built at boot. Afterwards HMR covers code edits.
+
+
 ## Configure
 
 Edit `cordis.patch.yml` in this directory:

@@ -1,5 +1,6 @@
 node_modules/
 vault.json
+cordis.patch.yml.bak-*
 *.log
 .DS_Store
 Thumbs.db
