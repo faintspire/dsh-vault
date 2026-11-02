@@ -2,7 +2,7 @@
   "name": "dsh-vault",
   "version": "0.5.1",
   "private": true,
-  "description": "Back up your DSH skills, memory and MCP configs into private Git repositories â€?with a settings panel, daily schedule or on demand.",
+  "description": "Back up your DSH skills, memory and MCP configs into private Git repositories, with a settings panel, a daily schedule or on demand.",
   "type": "module",
   "license": "MIT",
   "author": "faintspire",
@@ -14,16 +14,7 @@
   "bugs": {
     "url": "https://github.com/faintspire/dsh-vault/issues"
   },
-  "keywords": [
-    "dsh",
-    "deepseek-harness",
-    "plugin",
-    "skill",
-    "memory",
-    "mcp",
-    "git",
-    "backup"
-  ],
+  "keywords": ["dsh", "deepseek-harness", "plugin", "skill", "memory", "mcp", "git", "backup"],
   "engines": {
     "node": ">=20"
   },
@@ -35,17 +26,7 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
-  "files": [
-    "index.js",
-    "lib/",
-    "cordis.patch.yml",
-    "README.md",
-    "README.en.md",
-    "LICENSE",
-    "vault.example.json",
-    "scripts/",
-    "test/"
-  ],
+  "files": ["index.js", "lib/", "cordis.patch.yml", "README.md", "README.en.md", "LICENSE", "vault.example.json", "scripts/", "test/"],
   "scripts": {
     "test": "node test/verify.mjs",
     "install-plugin": "node scripts/install.mjs"
@@ -55,9 +36,7 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-renderer"
-      ],
+      "inject": ["@deepseek-ai/dsh-client-ui-renderer"],
       "platform": "web"
     }
   }
