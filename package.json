@@ -1,6 +1,6 @@
 {
   "name": "dsh-vault",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "Back up your DSH skills, memory and MCP configs into private Git repositories, with a settings panel, a daily schedule or on demand.",
   "type": "module",

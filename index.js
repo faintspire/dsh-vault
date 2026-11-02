@@ -16,7 +16,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const VERSION = '0.5.1'
+const VERSION = '0.5.2'
 
 const DEFAULTS = {
   schedule: { enabled: false, time: '03:30' },
