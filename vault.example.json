@@ -28,6 +28,11 @@
       "files": []
     }
   ],
+  "git": {
+    "userName": "liuzk",
+    "userEmail": "2824996801@qq.com",
+    "sshKeyPath": "C:\\Users\\liuzk\\.ssh\\id_ed25519"
+  },
   "schedule": {
     "enabled": true,
     "time": "03:30"

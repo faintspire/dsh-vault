@@ -43,22 +43,23 @@ The script adds a `link:` dependency, appends `dsh-vault` to `dsh.profile.bundle
 
 Once installed, a **Cloud backup** row appears in the sidebar:
 
-- repo URL, branch, last status and item count per target
-- a **Sync now** button, per target or for everything
+- repo URL, branch, last status and item count per target, with **Test** and **Sync now** buttons
+- **Git identity**: committer name, email and SSH private key path — hit Test to prove the key can reach the remote
 - the daily-schedule switch and time
 - **Save**: writes back to the plugin's own `cordis.patch.yml`, keeping a `.bak-<timestamp>` copy
 
 Source directories (`skills` / `dirs` / `files`) are deliberately **not** editable in the panel — that keeps a slip of the mouse from emptying the backup set. They stay in the config file.
 
-Behind the panel are three routes on the host's own `webServer`:
+Behind the panel are four routes on the host's own `webServer`:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/dsh-vault/state` | config, last result, next run |
+| GET | `/api/dsh-vault/state` | config (incl. git identity and whether the key exists), last result, next run |
 | POST | `/api/dsh-vault/sync` | run a sync, body may carry `{ "target": "memory" }` |
-| POST | `/api/dsh-vault/config` | save URLs / branches / time / switch |
+| POST | `/api/dsh-vault/config` | save URLs / branches / time / switch / git identity |
+| POST | `/api/dsh-vault/test` | run `git ls-remote` with the configured key to check connectivity |
 
-Both POST routes accept loopback requests only, and invalid input (say a time of `99:99`) returns 400 without touching the stored config.
+All three POST routes accept loopback requests only, and invalid input returns 400 without touching the stored config: a time of `99:99`, an email without `@`, or a key path that does not exist are all rejected.
 
 > The panel is the client half; the first install (or any change to `dsh.client`) needs one DSH restart, because the client asset roster is built at boot. Afterwards HMR covers code edits.
 
@@ -105,7 +106,11 @@ Edit `cordis.patch.yml` in this directory:
 | `targets[].files` | Individual files (MCP configs) |
 | `schedule.time` | 24-hour `HH:mm`, local time |
 | `secretPolicy` | `block` aborts the push, `mask` replaces hits with `[REDACTED:xxx]` |
+| `git.userName` / `git.userEmail` | Committer identity; empty falls back to `git config --global` |
+| `git.sshKeyPath` | Private key used for pushes; empty falls back to the default key and `~/.ssh/config` |
 | `token` | Only for `https://` URLs; otherwise `DSH_VAULT_TOKEN` |
+
+`git.sshKeyPath` works by injecting `GIT_SSH_COMMAND=ssh -i <key> -o IdentitiesOnly=yes`, so another key sitting in ssh-agent cannot win; Host/Port rewrites in `~/.ssh/config` (e.g. github.com over 443) still apply.
 
 Adding a fourth category (say, some plugin's config) needs no code change: add a target with `files` or `dirs`.
 

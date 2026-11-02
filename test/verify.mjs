@@ -26,10 +26,11 @@ const readRemoteFile = (remote, file) => git(['--git-dir', remote, 'show', `HEAD
 console.log('node', process.version)
 console.log('git ', execSync('git --version', { encoding: 'utf8' }).trim())
 
-process.env.GIT_AUTHOR_NAME = 'vault-test'
-process.env.GIT_AUTHOR_EMAIL = 'vault-test@example.com'
-process.env.GIT_COMMITTER_NAME = 'vault-test'
-process.env.GIT_COMMITTER_EMAIL = 'vault-test@example.com'
+// 故意不设 GIT_AUTHOR_* 环境变量：作者身份必须由 config.git 提供，否则下面的断言会被环境变量掩盖。
+delete process.env.GIT_AUTHOR_NAME
+delete process.env.GIT_AUTHOR_EMAIL
+delete process.env.GIT_COMMITTER_NAME
+delete process.env.GIT_COMMITTER_EMAIL
 
 // ---- 夹具：技能 / 记忆 / MCP
 fs.rmSync(TMP, { recursive: true, force: true })
@@ -74,6 +75,7 @@ const cfg = {
     },
   ],
   schedule: { enabled: false, time: '03:30' },
+  git: { userName: 'Vault Bot', userEmail: 'vault@test.local' },
   secretPolicy: 'block',
 }
 
@@ -102,6 +104,10 @@ check(!memTree.some((f) => f.startsWith('skills/')), '技能没有混进记忆�
 
 const mcpTree = tree(remotes.mcp)
 check(mcpTree.length === 1 && mcpTree[0] === 'index.json', '空 MCP 仓库只有 index.json', mcpTree.join(','))
+
+// ---- 1b. 提交者身份来自 config.git，而不是本机全局 git config
+const author = git(['--git-dir', remotes.skills, 'log', '-1', '--format=%an <%ae>'], TMP).trim()
+check(author === 'Vault Bot <vault@test.local>', '提交作者用的是配置里的 git 身份', author)
 
 // ---- 2. 幂等
 const h1 = { skills: head(remotes.skills), memory: head(remotes.memory), mcp: head(remotes.mcp) }

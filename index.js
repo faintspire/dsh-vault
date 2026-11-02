@@ -16,7 +16,7 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const VERSION = '0.4.0'
+const VERSION = '0.5.0'
 
 const DEFAULTS = {
   schedule: { enabled: false, time: '03:30' },
@@ -85,6 +85,12 @@ export function normalizeConfig(config = {}) {
   }
   const out = {
     targets,
+    // 提交者身份 + SSH 私钥；留空就用本机 git 的全局配置和默认 key。
+    git: {
+      userName: String(base?.git?.userName || '').trim(),
+      userEmail: String(base?.git?.userEmail || '').trim(),
+      sshKeyPath: expandHome(base?.git?.sshKeyPath || ''),
+    },
     schedule: { ...DEFAULTS.schedule, ...(base.schedule || {}) },
     secretPolicy: ['block', 'mask'].includes(base.secretPolicy) ? base.secretPolicy : 'block',
     maxFileBytes: Number(base.maxFileBytes) || DEFAULTS.maxFileBytes,
@@ -109,6 +115,22 @@ function authUrl(repo) {
   }
 }
 
+/** 提交者身份与 SSH 私钥：留空则沿用本机 git 的全局配置。 */
+function gitEnv(cfg) {
+  const key = cfg?.git?.sshKeyPath
+  if (!key) return {}
+  // IdentitiesOnly 防止 ssh-agent 里别的 key 抢先被选中。
+  return { GIT_SSH_COMMAND: `ssh -i "${key}" -o IdentitiesOnly=yes -o BatchMode=yes` }
+}
+
+function commitArgs(cfg, message) {
+  const args = []
+  if (cfg?.git?.userName) args.push('-c', `user.name=${cfg.git.userName}`)
+  if (cfg?.git?.userEmail) args.push('-c', `user.email=${cfg.git.userEmail}`)
+  args.push('commit', '-m', message)
+  return args
+}
+
 /** 打印用地址：去掉密码，避免 token 落进日志。 */
 function displayUrl(url) {
   return String(url).replace(/\/\/([^/@]+)@/, '//***@')
@@ -121,7 +143,7 @@ function tail(s, n = 600) {
   return text.length > n ? '...' + text.slice(-n) : text
 }
 
-function git(cwd, args, { timeout = 180000 } = {}) {
+function git(cwd, args, { timeout = 180000, env = {} } = {}) {
   return new Promise((resolve) => {
     const child = execFile(
       'git',
@@ -132,7 +154,7 @@ function git(cwd, args, { timeout = 180000 } = {}) {
         timeout,
         maxBuffer: 32 * 1024 * 1024,
         // 没有可用凭据时立刻失败，不要挂在交互式密码提示上（定时任务会卡死）。
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...env },
       },
       (err, stdout, stderr) => {
         resolve({
@@ -150,14 +172,15 @@ function git(cwd, args, { timeout = 180000 } = {}) {
 
 // ---------------------------------------------------------------- 仓库
 
-async function ensureRepo(repo, log) {
+async function ensureRepo(repo, cfg, log) {
   const { workdir, branch, remote } = repo
   const url = authUrl(repo)
+  const env = gitEnv(cfg)
 
   if (!fs.existsSync(path.join(workdir, '.git'))) {
     await fsp.mkdir(path.dirname(workdir), { recursive: true })
     log(`clone ${displayUrl(url)} -> ${workdir}`)
-    const clone = await git(path.dirname(workdir), ['clone', '--branch', branch, '--', url, workdir])
+    const clone = await git(path.dirname(workdir), ['clone', '--branch', branch, '--', url, workdir], { env })
     if (!clone.ok) {
       // 空仓库（还没有任何提交）clone 会失败，退化成 init + remote add。
       await fsp.rm(workdir, { recursive: true, force: true }).catch(() => {})
@@ -174,14 +197,14 @@ async function ensureRepo(repo, log) {
   else if (current.stdout.trim() !== url) await git(workdir, ['remote', 'set-url', remote, url])
 
   // 另一台机器可能已经推过：先拉一次，冲突交给用户看，不静默覆盖。
-  const fetch = await git(workdir, ['fetch', '--prune', remote])
+  const fetch = await git(workdir, ['fetch', '--prune', remote], { env })
   if (!fetch.ok) {
     log(`fetch 失败（网络或凭据问题，稍后 push 会再报）: ${tail(fetch.stderr || fetch.message)}`)
     return workdir
   }
   const hasLocal = await git(workdir, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
   if (hasLocal.ok) {
-    const pull = await git(workdir, ['pull', '--rebase', '--autostash', remote, branch])
+    const pull = await git(workdir, ['pull', '--rebase', '--autostash', remote, branch], { env })
     if (!pull.ok) log(`pull 失败，继续用本地副本: ${tail(pull.stderr || pull.message)}`)
   } else {
     // 远端还没有这个分支（空仓库首推）时没有可 checkout 的起点，保持当前 HEAD。
@@ -389,7 +412,7 @@ async function syncTarget(cfg, target, log) {
   const repo = target.repo
   if (!repo.url) return { name: target.name, status: 'unconfigured' }
 
-  await ensureRepo(repo, log)
+  await ensureRepo(repo, cfg, log)
   const { root, entries } = exportTarget(target, cfg, log)
 
   const hits = await scanSecrets(root, target.name, cfg, log)
@@ -410,10 +433,10 @@ async function syncTarget(cfg, target, log) {
   await git(repo.workdir, ['add', '-A'])
   const stamp = new Date().toLocaleString('sv-SE').slice(0, 19)
   const message = `sync: ${stamp} · ${entries.length} ${target.name}`
-  const commit = await git(repo.workdir, ['commit', '-m', message])
+  const commit = await git(repo.workdir, commitArgs(cfg, message))
   if (!commit.ok) throw new Error(`git commit 失败: ${tail(commit.stderr || commit.message)}`)
 
-  const push = await git(repo.workdir, ['push', '--set-upstream', repo.remote, repo.branch])
+  const push = await git(repo.workdir, ['push', '--set-upstream', repo.remote, repo.branch], { env: gitEnv(cfg) })
   if (!push.ok) {
     const err = new Error(`git push 失败: ${tail(push.stderr || push.message)}`)
     err.code = 'PUSH_FAILED'
@@ -674,6 +697,7 @@ const API = {
   state: '/api/dsh-vault/state',
   sync: '/api/dsh-vault/sync',
   config: '/api/dsh-vault/config',
+  test: '/api/dsh-vault/test',
 }
 
 function writeJson(res, status, value) {
@@ -751,6 +775,12 @@ function emitPatch(cfg) {
   lines.push(`          time: ${yamlString(cfg.schedule.time)}`)
   lines.push(`        secretPolicy: ${yamlString(cfg.secretPolicy)}`)
   lines.push(`        maxFileBytes: ${cfg.maxFileBytes}`)
+  if (cfg.git.userName || cfg.git.userEmail || cfg.git.sshKeyPath) {
+    lines.push('        git:')
+    if (cfg.git.userName) lines.push(`          userName: ${yamlString(cfg.git.userName)}`)
+    if (cfg.git.userEmail) lines.push(`          userEmail: ${yamlString(cfg.git.userEmail)}`)
+    if (cfg.git.sshKeyPath) lines.push(`          sshKeyPath: ${yamlString(cfg.git.sshKeyPath)}`)
+  }
   return lines.join('\n') + '\n'
 }
 
@@ -770,6 +800,12 @@ function panelState(ref) {
       error: state[target.name]?.error || '',
     })),
     schedule: { enabled: cfg.schedule.enabled, time: cfg.schedule.time },
+    git: {
+      userName: cfg.git.userName,
+      userEmail: cfg.git.userEmail,
+      sshKeyPath: cfg.git.sshKeyPath,
+      keyExists: cfg.git.sshKeyPath ? fs.existsSync(cfg.git.sshKeyPath) : false,
+    },
     nextRunAt: cfg.schedule.enabled && anyConfigured ? new Date(Date.now() + msUntil(cfg.schedule.time)).toISOString() : '',
     lastRunAt: state.lastRunAt || '',
     lastStatus: state.lastStatus || '',
@@ -793,6 +829,14 @@ function validatePanelInput(body) {
   if (time !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(time))) {
     throw new Error(`时间要写成 HH:mm（00:00–23:59），收到 ${JSON.stringify(time)}`)
   }
+  const email = body?.git?.userEmail
+  if (email !== undefined && String(email).trim() && !/^[^\s@]+@[^\s@]+$/.test(String(email).trim())) {
+    throw new Error(`邮箱格式不对：${email}`)
+  }
+  const key = body?.git?.sshKeyPath
+  if (key !== undefined && String(key).trim() && !fs.existsSync(expandHome(String(key).trim()))) {
+    throw new Error(`SSH 私钥不存在：${key}`)
+  }
 }
 
 function mergePanelConfig(ref, body) {
@@ -813,8 +857,14 @@ function mergePanelConfig(ref, body) {
       files: target.files,
     }
   })
+  const pick = (value, fallback) => (typeof value === 'string' ? value.trim() : fallback)
   return {
     targets,
+    git: {
+      userName: pick(body?.git?.userName, ref.cfg.git.userName),
+      userEmail: pick(body?.git?.userEmail, ref.cfg.git.userEmail),
+      sshKeyPath: expandHome(pick(body?.git?.sshKeyPath, ref.cfg.git.sshKeyPath)),
+    },
     schedule: {
       enabled: body?.schedule?.enabled === true,
       time: typeof body?.schedule?.time === 'string' ? body.schedule.time : ref.cfg.schedule.time,
@@ -893,43 +943,86 @@ function panelRoutes(ref, log, reschedule) {
         writeJson(res, 200, { ok: true, state: panelState(ref) })
       },
     },
+    {
+      kind: 'exact',
+      path: API.test,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') return writeJson(res, 405, { error: 'method not allowed' })
+        if (!isLoopback(req)) return writeJson(res, 403, { error: 'only the local machine may test a repo' })
+        let body = {}
+        try {
+          body = await readJsonBody(req)
+        } catch (err) {
+          return writeJson(res, 400, { error: String(err.message) })
+        }
+        const name = typeof body?.target === 'string' ? body.target : null
+        const target = ref.cfg.targets.find((t) => t.name === name) || ref.cfg.targets.find((t) => t.repo.url)
+        if (!target || !target.repo.url) return writeJson(res, 400, { error: '这个 target 还没有配置仓库地址' })
+        // 只列远端分支：既验证地址，也验证 SSH key / token 能否通过认证。
+        const result = await git(process.cwd(), ['ls-remote', '--heads', authUrl(target.repo), target.repo.branch], {
+          env: gitEnv(ref.cfg),
+          timeout: 60000,
+        })
+        const output = result.ok ? result.stdout.trim() : tail(result.stderr || result.message, 400)
+        writeJson(res, 200, { ok: result.ok, target: target.name, output: output || '(远端没有这个分支)' })
+      },
+    },
   ]
 }
 
 function mountPanel(ctx, ref, log, reschedule) {
-  let webServer
-  try {
-    webServer = typeof ctx?.get === 'function' ? ctx.get('webServer') : undefined
-  } catch {
-    webServer = undefined
-  }
-  if (!webServer) {
+  const bind = (webServer) => {
+    if (!webServer || typeof webServer.register !== 'function') return false
+    const disposers = []
     try {
-      webServer = ctx?.webServer
+      for (const route of panelRoutes(ref, log, reschedule)) disposers.push(webServer.register(route))
+    } catch (err) {
+      console.warn(`[vault] 面板路由注册失败: ${err && err.message}`)
+      return false
+    }
+    const dispose = () => {
+      for (const d of disposers.splice(0)) {
+        try {
+          d()
+        } catch {}
+      }
+    }
+    if (typeof ctx?.effect === 'function') ctx.effect(() => dispose)
+    log(`面板接口已挂载: ${API.state}`)
+    return true
+  }
+
+  const lookup = () => {
+    try {
+      const found = typeof ctx?.get === 'function' ? ctx.get('webServer') : undefined
+      if (found) return found
+    } catch {}
+    try {
+      return ctx?.webServer
     } catch {
-      webServer = undefined
+      return undefined
     }
   }
-  if (!webServer || typeof webServer.register !== 'function') {
-    log('宿主没有 webServer 服务，面板接口未挂载（CLI 仍可用）')
-    return
+
+  if (bind(lookup())) return
+
+  // 启动时 webServer 可能还没挂上：先等它的事件，再退化成短轮询，别把面板永久丢掉。
+  if (typeof ctx?.inject === 'function') {
+    try {
+      ctx.inject(['webServer'], (scoped) => {
+        const found = (scoped && (scoped.webServer || scoped.get?.('webServer'))) || lookup()
+        bind(found)
+      })
+      return
+    } catch {}
   }
-  const disposers = []
-  try {
-    for (const route of panelRoutes(ref, log, reschedule)) disposers.push(webServer.register(route))
-  } catch (err) {
-    console.warn(`[vault] 面板路由注册失败: ${err && err.message}`)
-    return
-  }
-  const dispose = () => {
-    for (const d of disposers.splice(0)) {
-      try {
-        d()
-      } catch {}
-    }
-  }
-  if (typeof ctx?.effect === 'function') ctx.effect(() => dispose)
-  log(`面板接口已挂载: ${API.state}`)
+  let attempts = 0
+  const timer = setInterval(() => {
+    attempts += 1
+    if (bind(lookup()) || attempts > 40) clearInterval(timer)
+  }, 250)
+  if (typeof timer.unref === 'function') timer.unref()
+  if (typeof ctx?.effect === 'function') ctx.effect(() => () => clearInterval(timer))
 }
 
 // ---------------------------------------------------------------- CLI

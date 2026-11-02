@@ -43,22 +43,23 @@ node scripts/install.mjs --profile desktop
 
 装好后左侧栏多一行「云端备份」，点进去是：
 
-- 每个 target 的仓库地址、分支、上次同步状态和条数
-- 「立即同步」按钮（单个 target，或一次全部）
+- 每个 target 的仓库地址、分支、上次同步状态和条数，以及「测试」「立即同步」两个按钮
+- 「Git 身份」：提交者名字、邮箱、SSH 私钥路径；填完点「测试」就能确认这把 key 能不能连上远端
 - 自动同步开关 + 每天几点
 - 「保存配置」：写回插件自己的 `cordis.patch.yml`，写入前自动备份成 `.bak-<时间戳>`
 
 数据源目录（`skills` / `dirs` / `files`）**不在面板里改**，避免手滑删掉备份范围，仍然写在配置文件里。
 
-面板背后是宿主自己的 `webServer`，三个接口：
+面板背后是宿主自己的 `webServer`，四个接口：
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| GET | `/api/dsh-vault/state` | 当前配置 + 上次结果 + 下次同步时间 |
+| GET | `/api/dsh-vault/state` | 当前配置（含 git 身份、私钥是否存在）+ 上次结果 + 下次同步时间 |
 | POST | `/api/dsh-vault/sync` | 触发同步，body 可带 `{ "target": "memory" }` |
-| POST | `/api/dsh-vault/config` | 保存仓库地址 / 分支 / 时间 / 开关 |
+| POST | `/api/dsh-vault/config` | 保存仓库地址 / 分支 / 时间 / 开关 / Git 身份 |
+| POST | `/api/dsh-vault/test` | 用当前 SSH 私钥跑一次 `git ls-remote`，验证能否连上 |
 
-两个 POST 只接受本机回环请求，非法输入（比如时间写成 `99:99`）返回 400 并保持原配置不动。
+三个 POST 只接受本机回环请求。非法输入返回 400 且不改动原配置：时间写成 `99:99`、邮箱没有 `@`、私钥路径指向不存在的文件都会被拦下。
 
 > 面板属于客户端半边，第一次装上（或改了 `dsh.client`）要重启一次 DSH —— 客户端资源清单是启动时生成的。之后改代码走 HMR。
 
@@ -105,7 +106,11 @@ node scripts/install.mjs --profile desktop
 | `targets[].files` | 单个文件（MCP 配置用） |
 | `schedule.time` | 24 小时制 `HH:mm`，本地时间 |
 | `secretPolicy` | `block` 中止推送 / `mask` 替换成 `[REDACTED:xxx]` 后继续 |
+| `git.userName` / `git.userEmail` | 提交者身份。留空沿用本机 `git config --global` |
+| `git.sshKeyPath` | 推送用的 SSH 私钥。留空沿用默认 key 与 `~/.ssh/config` |
 | `token` | 仅 `https://` 地址需要；留空读环境变量 `DSH_VAULT_TOKEN` |
+
+`git.sshKeyPath` 生效方式：推送时注入 `GIT_SSH_COMMAND=ssh -i <key> -o IdentitiesOnly=yes`，所以不会被 ssh-agent 里别的 key 抢走；`~/.ssh/config` 里的 Host/Port 改写（比如 github.com 走 443）照样生效。
 
 要加第四类东西（比如某个插件配置），不用改代码：加一个 target，配 `files` 或 `dirs` 就行。
 

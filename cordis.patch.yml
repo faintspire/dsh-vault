@@ -31,3 +31,9 @@
           time: '03:30'
         secretPolicy: 'block'
         maxFileBytes: 1048576
+
+        # 提交者身份与 SSH 私钥。留空就用本机 git 的全局配置和默认 key。
+        git:
+          userName: 'liuzk'
+          userEmail: '2824996801@qq.com'
+          sshKeyPath: 'C:\Users\liuzk\.ssh\id_ed25519'
