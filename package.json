@@ -1,34 +1,34 @@
 {
-  "name": "dsh-skill-sync",
-  "version": "0.2.0",
+  "name": "dsh-vault",
+  "version": "0.3.0",
   "private": true,
-  "description": "Sync DSH skills and MCP configs to private Git repositories — on a daily schedule or on demand.",
+  "description": "Back up your DSH skills, memory and MCP configs into private Git repositories — daily or on demand.",
   "type": "module",
   "license": "MIT",
   "author": "faintspire",
-  "homepage": "https://github.com/faintspire/dsh-skill-sync#readme",
+  "homepage": "https://github.com/faintspire/dsh-vault#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/faintspire/dsh-skill-sync.git"
+    "url": "git+https://github.com/faintspire/dsh-vault.git"
   },
   "bugs": {
-    "url": "https://github.com/faintspire/dsh-skill-sync/issues"
+    "url": "https://github.com/faintspire/dsh-vault/issues"
   },
   "keywords": [
     "dsh",
     "deepseek-harness",
     "plugin",
     "skill",
+    "memory",
     "mcp",
     "git",
-    "sync",
     "backup"
   ],
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "dsh-skill-sync": "./index.js"
+    "dsh-vault": "./index.js"
   },
   "exports": {
     ".": "./index.js"
@@ -39,7 +39,7 @@
     "README.md",
     "README.en.md",
     "LICENSE",
-    "skill-sync.example.json",
+    "vault.example.json",
     "scripts/",
     "test/"
   ],

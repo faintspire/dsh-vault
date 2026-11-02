@@ -1,12 +1,11 @@
 /**
- * dsh-skill-sync
+ * dsh-vault
  *
- * 把本地技能包（<name>/SKILL.md）与 MCP 配置分别同步到两个私有 git 仓库：
- * 插件侧按天定时 push，并向 agent 暴露 skill_sync / skill_sync_status；
- * 命令行侧 `node index.js sync --config skill-sync.json` 手动跑同一条路径。
+ * 把 DSH 的可携带资产分别同步到独立的私有 git 仓库：技能包、用户/项目记忆、MCP 配置。
+ * 每个 target 一个仓库、一个被管理的子目录；插件按天定时 push，也可随时手动推。
  *
- * 约定：每个仓库里只有一个被管理的子目录（skills/ 或 mcp/），每次同步先清空再重建，
- * 所以远端不会残留本地已删除的条目；仓库根的 README / LICENSE 等文件不动。
+ * 约定：每个仓库里只有 <target>/ 目录由本插件管理，每次先清空再重建，所以远端不会残留
+ * 本地已删除的条目；仓库根的 README / LICENSE 等手写文件不动。
  */
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
@@ -16,26 +15,9 @@ import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-const VERSION = '0.2.0'
-const KINDS = ['skills', 'mcp']
+const VERSION = '0.3.0'
 
 const DEFAULTS = {
-  repos: {
-    skills: {
-      url: '',
-      branch: 'main',
-      remote: 'origin',
-      workdir: path.join(os.homedir(), '.dsh', 'skill-sync', 'dsh-skills'),
-      roots: [path.join(os.homedir(), '.dsh', 'skills'), path.join(os.homedir(), '.agents', 'skills')],
-    },
-    mcp: {
-      url: '',
-      branch: 'main',
-      remote: 'origin',
-      workdir: path.join(os.homedir(), '.dsh', 'skill-sync', 'dsh-mcp'),
-      files: [],
-    },
-  },
   schedule: { enabled: false, time: '03:30' },
   // block：发现密钥就中止该仓库的推送；mask：把命中的片段替换成 [REDACTED:xxx] 后继续。
   secretPolicy: 'block',
@@ -66,27 +48,42 @@ function expandHome(p) {
 
 const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []).filter((x) => typeof x === 'string' && x.trim())
 
-function normalizeRepo(raw, defaults) {
-  const repo = { ...defaults, ...(raw || {}) }
-  repo.url = String(repo.url || '').trim()
-  repo.branch = String(repo.branch || 'main')
-  repo.remote = String(repo.remote || 'origin')
-  repo.workdir = expandHome(repo.workdir || defaults.workdir)
-  repo.token = repo.token || process.env.DSH_SKILL_SYNC_TOKEN || ''
-  return repo
+function normalizeTarget(raw, index) {
+  const name = String(raw?.name || '').trim()
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+    throw new Error(`target 名字必须是 kebab-case（小写字母/数字/连字符），第 ${index + 1} 个是 ${JSON.stringify(name)}`)
+  }
+  const repo = raw?.repo || {}
+  const workdir = expandHome(repo.workdir || path.join(os.homedir(), '.dsh', 'vault', `dsh-${name}`))
+  return {
+    name,
+    repo: {
+      url: String(repo.url || '').trim(),
+      branch: String(repo.branch || 'main'),
+      remote: String(repo.remote || 'origin'),
+      workdir,
+      token: repo.token || process.env.DSH_VAULT_TOKEN || '',
+    },
+    // 技能根目录：每个含 SKILL.md 的直接子目录算一个技能包。
+    skills: asList(raw?.skills).map(expandHome),
+    // 整棵目录照搬（记忆的 runtime / documents 就是这种）。
+    dirs: asList(raw?.dirs).map(expandHome),
+    // 单个文件（MCP 配置这种）。
+    files: asList(raw?.files).map(expandHome),
+  }
 }
 
 export function normalizeConfig(config = {}) {
   const base = config || {}
-  const raw = base.repos || {}
-  const skills = normalizeRepo(raw.skills, DEFAULTS.repos.skills)
-  const mcp = normalizeRepo(raw.mcp, DEFAULTS.repos.mcp)
-  skills.roots = asList(skills.roots).filter(Boolean).map(expandHome)
-  if (!skills.roots.length) skills.roots = DEFAULTS.repos.skills.roots
-  mcp.files = asList(mcp.files).filter(Boolean).map(expandHome)
-
+  const rawTargets = Array.isArray(base.targets) ? base.targets : []
+  const targets = rawTargets.map((raw, i) => normalizeTarget(raw, i))
+  const names = new Set()
+  for (const target of targets) {
+    if (names.has(target.name)) throw new Error(`target 重名: ${target.name}`)
+    names.add(target.name)
+  }
   const out = {
-    repos: { skills, mcp },
+    targets,
     schedule: { ...DEFAULTS.schedule, ...(base.schedule || {}) },
     secretPolicy: ['block', 'mask'].includes(base.secretPolicy) ? base.secretPolicy : 'block',
     maxFileBytes: Number(base.maxFileBytes) || DEFAULTS.maxFileBytes,
@@ -267,15 +264,8 @@ function readSkillMeta(file) {
   return meta
 }
 
-function resetDir(dir) {
-  fs.rmSync(dir, { recursive: true, force: true })
-  fs.mkdirSync(dir, { recursive: true })
-}
-
-function exportSkills(repoDir, roots, cfg, log) {
-  const target = path.join(repoDir, 'skills')
-  resetDir(target)
-  const skills = []
+function collectSkills(roots, cfg, log) {
+  const items = []
   const seen = new Set()
   for (const root of roots) {
     let entries = []
@@ -288,43 +278,56 @@ function exportSkills(repoDir, roots, cfg, log) {
     for (const entry of entries) {
       if (!entry.isDirectory() || cfg.ignored.has(entry.name)) continue
       const src = path.join(root, entry.name)
-      const skillFile = path.join(src, 'SKILL.md')
-      if (!fs.existsSync(skillFile)) continue
+      if (!fs.existsSync(path.join(src, 'SKILL.md'))) continue
       if (seen.has(entry.name)) {
-        log(`技能重名，保留先出现的那个: ${entry.name} (${src})`)
+        log(`条目重名，保留先出现的那个: ${entry.name} (${src})`)
         continue
       }
       seen.add(entry.name)
-      const dst = path.join(target, entry.name)
-      copyTree(src, dst, cfg)
-      const meta = readSkillMeta(skillFile)
-      skills.push({ name: entry.name, description: meta.description || '', source: src, ...digestDir(dst) })
+      items.push({ name: entry.name, type: 'skill', src, description: readSkillMeta(path.join(src, 'SKILL.md')).description || '' })
     }
   }
-  skills.sort((a, b) => a.name.localeCompare(b.name))
-  return skills.map(({ name, description, sha256, files, bytes }) => ({ name, description, sha256, files, bytes }))
+  return items
 }
 
-function exportMcp(repoDir, files, cfg, log) {
-  const target = path.join(repoDir, 'mcp')
-  resetDir(target)
-  const configs = []
-  for (const src of files) {
-    let stat
-    try {
-      stat = fs.statSync(src)
-    } catch {
-      log(`MCP 配置不存在，跳过: ${src}`)
+function exportTarget(target, cfg, log) {
+  const root = path.join(target.repo.workdir, target.name)
+  fs.rmSync(root, { recursive: true, force: true })
+  fs.mkdirSync(root, { recursive: true })
+
+  const items = []
+  for (const item of collectSkills(target.skills, cfg, log)) items.push(item)
+  for (const dir of target.dirs) {
+    if (!fs.existsSync(dir)) {
+      log(`目录不存在，跳过: ${dir}`)
       continue
     }
-    if (!stat.isFile()) continue
-    const name = path.basename(src)
-    const dst = path.join(target, name)
-    copyTree(src, dst, cfg)
-    configs.push({ name, ...digestFile(dst) })
+    items.push({ name: path.basename(dir), type: 'dir', src: dir })
   }
-  configs.sort((a, b) => a.name.localeCompare(b.name))
-  return configs.map(({ name, sha256, bytes }) => ({ name, sha256, bytes }))
+  for (const file of target.files) {
+    if (!fs.existsSync(file)) {
+      log(`文件不存在，跳过: ${file}`)
+      continue
+    }
+    items.push({ name: path.basename(file), type: 'file', src: file })
+  }
+
+  const entries = []
+  const used = new Set()
+  for (const item of items) {
+    if (used.has(item.name)) {
+      log(`同一 target 内重名，跳过: ${item.name}`)
+      continue
+    }
+    used.add(item.name)
+    const dst = path.join(root, item.name)
+    copyTree(item.src, dst, cfg)
+    const digest = fs.statSync(dst).isDirectory() ? digestDir(dst) : digestFile(dst)
+    entries.push({ name: item.name, type: item.type, ...(item.description ? { description: item.description } : {}), ...digest })
+  }
+
+  entries.sort((a, b) => a.name.localeCompare(b.name))
+  return { root, entries }
 }
 
 // ---------------------------------------------------------------- 密钥扫描
@@ -343,61 +346,52 @@ function isTextFile(file) {
   }
 }
 
-async function scanSecrets(repoDir, cfg, log) {
+async function scanSecrets(root, label, cfg, log) {
   const hits = []
-  const root = path.join(repoDir, 'skills')
-  const mcpRoot = path.join(repoDir, 'mcp')
-  for (const base of [root, mcpRoot]) {
-    const files = []
-    walkFiles(base, base, files)
-    const label = path.basename(base)
-    for (const rel of files) {
-      const abs = path.join(base, rel)
-      if (!isTextFile(abs)) continue
-      let text
-      try {
-        text = await fsp.readFile(abs, 'utf8')
-      } catch {
-        continue
-      }
-      let masked = text
-      for (const pattern of SECRET_PATTERNS) {
-        pattern.re.lastIndex = 0
-        if (!pattern.re.test(text)) continue
-        hits.push({ file: `${label}/${rel}`, id: pattern.id })
-        if (cfg.secretPolicy === 'mask') {
-          pattern.re.lastIndex = 0
-          masked = masked.replace(pattern.re, `[REDACTED:${pattern.id}]`)
-        }
-      }
-      if (cfg.secretPolicy === 'mask' && masked !== text) await fsp.writeFile(abs, masked)
+  const files = []
+  walkFiles(root, root, files)
+  for (const rel of files) {
+    const abs = path.join(root, rel)
+    if (!isTextFile(abs)) continue
+    let text
+    try {
+      text = await fsp.readFile(abs, 'utf8')
+    } catch {
+      continue
     }
+    let masked = text
+    for (const pattern of SECRET_PATTERNS) {
+      pattern.re.lastIndex = 0
+      if (!pattern.re.test(text)) continue
+      hits.push({ file: `${label}/${rel}`, id: pattern.id })
+      if (cfg.secretPolicy === 'mask') {
+        pattern.re.lastIndex = 0
+        masked = masked.replace(pattern.re, `[REDACTED:${pattern.id}]`)
+      }
+    }
+    if (cfg.secretPolicy === 'mask' && masked !== text) await fsp.writeFile(abs, masked)
   }
   if (hits.length) log(`密钥扫描命中 ${hits.length} 处（策略 ${cfg.secretPolicy}）`)
   return hits
 }
 
-// ---------------------------------------------------------------- 单个仓库同步
-
-function writeIndex(repoDir, kind, payload) {
+function writeIndex(repoDir, target, entries) {
   // 故意不写时间戳：index.json 必须内容稳定，否则每次同步都会产生一个空提交。
-  const index = { generator: `dsh-skill-sync@${VERSION}`, ...payload }
+  const index = { generator: `dsh-vault@${VERSION}`, target: target.name, entries }
   fs.writeFileSync(path.join(repoDir, 'index.json'), JSON.stringify(index, null, 2) + '\n', 'utf8')
   return index
 }
 
-async function syncRepo(kind, repo, cfg, log) {
-  if (!repo.url) return { kind, status: 'unconfigured' }
+// ---------------------------------------------------------------- 单个 target 同步
+
+async function syncTarget(cfg, target, log) {
+  const repo = target.repo
+  if (!repo.url) return { name: target.name, status: 'unconfigured' }
 
   await ensureRepo(repo, log)
-  const dir = repo.workdir
+  const { root, entries } = exportTarget(target, cfg, log)
 
-  const payload = kind === 'skills'
-    ? { skills: exportSkills(dir, repo.roots, cfg, log) }
-    : { configs: exportMcp(dir, repo.files, cfg, log) }
-  const count = kind === 'skills' ? payload.skills.length : payload.configs.length
-
-  const hits = await scanSecrets(dir, cfg, log)
+  const hits = await scanSecrets(root, target.name, cfg, log)
   if (hits.length && cfg.secretPolicy === 'block') {
     const detail = hits.map((h) => `${h.file} (${h.id})`).join('、')
     const err = new Error(`检测到疑似密钥，已中止推送：${detail}`)
@@ -406,19 +400,19 @@ async function syncRepo(kind, repo, cfg, log) {
     throw err
   }
 
-  writeIndex(dir, kind, payload)
+  writeIndex(repo.workdir, target, entries)
 
-  const status = await git(dir, ['status', '--porcelain'])
+  const status = await git(repo.workdir, ['status', '--porcelain'])
   if (!status.ok) throw new Error(`git status 失败: ${tail(status.stderr || status.message)}`)
-  if (!status.stdout.trim()) return { kind, status: 'up-to-date', count, workdir: dir }
+  if (!status.stdout.trim()) return { name: target.name, status: 'up-to-date', count: entries.length, workdir: repo.workdir }
 
-  await git(dir, ['add', '-A'])
+  await git(repo.workdir, ['add', '-A'])
   const stamp = new Date().toLocaleString('sv-SE').slice(0, 19)
-  const message = `sync: ${stamp} · ${count} ${kind === 'skills' ? 'skills' : 'configs'}`
-  const commit = await git(dir, ['commit', '-m', message])
+  const message = `sync: ${stamp} · ${entries.length} ${target.name}`
+  const commit = await git(repo.workdir, ['commit', '-m', message])
   if (!commit.ok) throw new Error(`git commit 失败: ${tail(commit.stderr || commit.message)}`)
 
-  const push = await git(dir, ['push', '--set-upstream', repo.remote, repo.branch])
+  const push = await git(repo.workdir, ['push', '--set-upstream', repo.remote, repo.branch])
   if (!push.ok) {
     const err = new Error(`git push 失败: ${tail(push.stderr || push.message)}`)
     err.code = 'PUSH_FAILED'
@@ -426,40 +420,40 @@ async function syncRepo(kind, repo, cfg, log) {
     throw err
   }
   log(`已推送到 ${displayUrl(repo.url)} (${repo.remote}/${repo.branch}): ${message}`)
-  return { kind, status: 'pushed', count, workdir: dir, message }
+  return { name: target.name, status: 'pushed', count: entries.length, workdir: repo.workdir, message }
 }
 
 /**
- * 同步所有已配置的仓库。单个仓库失败不影响另一个，结果里逐条报告。
- * @returns {{ status: string, repos: Array<object> }}
+ * 同步所有已配置的 target。单个失败不影响其它，结果里逐条报告。
+ * @returns {{ status: string, targets: Array<object> }}
  */
 export async function syncAll(rawConfig, { log = () => {}, only = null } = {}) {
   const cfg = normalizeConfig(rawConfig)
-  const repos = []
-  for (const kind of KINDS) {
-    if (only && only !== kind) continue
+  const results = []
+  for (const target of cfg.targets) {
+    if (only && only !== target.name) continue
     try {
-      repos.push(await syncRepo(kind, cfg.repos[kind], cfg, log))
+      results.push(await syncTarget(cfg, target, log))
     } catch (err) {
-      repos.push({
-        kind,
+      results.push({
+        name: target.name,
         status: 'failed',
         error: String(err && err.message ? err.message : err),
         code: err && err.code ? err.code : 'ERROR',
       })
     }
   }
-  const failed = repos.some((r) => r.status === 'failed')
-  const changed = repos.some((r) => r.status === 'pushed')
-  const anyConfigured = repos.some((r) => r.status !== 'unconfigured')
+  const failed = results.some((r) => r.status === 'failed')
+  const changed = results.some((r) => r.status === 'pushed')
+  const anyConfigured = results.some((r) => r.status !== 'unconfigured')
   const status = failed ? 'failed' : changed ? 'pushed' : anyConfigured ? 'up-to-date' : 'unconfigured'
-  return { status, repos }
+  return { status, targets: results }
 }
 
 // ---------------------------------------------------------------- 状态
 
 function stateFile() {
-  return path.join(os.homedir(), '.dsh', 'skill-sync-state.json')
+  return path.join(os.homedir(), '.dsh', 'vault-state.json')
 }
 
 export function readState() {
@@ -491,24 +485,23 @@ function msUntil(time) {
 let running = null
 
 async function guardedRun(cfg, reason, log) {
-  const configured = KINDS.filter((kind) => cfg.repos[kind].url)
-  if (!configured.length) return { status: 'unconfigured', repos: [] }
+  if (!cfg.targets.some((t) => t.repo.url)) return { status: 'unconfigured', targets: [] }
   if (running) {
     log('上一次同步还没结束，本次跳过')
-    return { status: 'busy', repos: [] }
+    return { status: 'busy', targets: [] }
   }
   running = (async () => {
     try {
       const result = await syncAll(cfg, { log })
       const patch = { lastRunAt: new Date().toISOString(), lastStatus: result.status, lastReason: reason, lastError: '' }
-      for (const repo of result.repos) patch[repo.kind] = repo
+      for (const target of result.targets) patch[target.name] = target
       await writeState(patch)
       return result
     } catch (err) {
       const message = String(err && err.message ? err.message : err)
-      console.error(`[skill-sync] 同步失败: ${message}`)
+      console.error(`[vault] 同步失败: ${message}`)
       await writeState({ lastRunAt: new Date().toISOString(), lastStatus: 'failed', lastReason: reason, lastError: message })
-      return { status: 'failed', repos: [], error: message }
+      return { status: 'failed', targets: [], error: message }
     } finally {
       running = null
     }
@@ -517,14 +510,13 @@ async function guardedRun(cfg, reason, log) {
 }
 
 function summarize(result) {
-  if (!result || !result.repos || !result.repos.length) return result?.status || '无结果'
-  return result.repos
-    .map((repo) => {
-      const label = repo.kind === 'skills' ? '技能' : 'MCP'
-      if (repo.status === 'pushed') return `${label}: 已推送 ${repo.count} 条`
-      if (repo.status === 'up-to-date') return `${label}: 无变化`
-      if (repo.status === 'unconfigured') return `${label}: 未配置仓库`
-      return `${label}: 失败 - ${repo.error || ''}`
+  if (!result || !result.targets || !result.targets.length) return result?.status || '无结果'
+  return result.targets
+    .map((target) => {
+      if (target.status === 'pushed') return `${target.name}: 已推送 ${target.count} 条`
+      if (target.status === 'up-to-date') return `${target.name}: 无变化`
+      if (target.status === 'unconfigured') return `${target.name}: 未配置仓库`
+      return `${target.name}: 失败 - ${target.error || ''}`
     })
     .join('\n')
 }
@@ -539,12 +531,14 @@ async function registerTools(ctx, cfg, log) {
     defineTool = (options) => options
   }
 
+  const names = cfg.targets.map((t) => t.name)
+
   const syncTool = defineTool({
-    name: 'skill_sync',
+    name: 'vault_sync',
     description:
-      '立即把本地技能目录（SKILL.md）与 MCP 配置同步到配置好的私有 git 仓库并推送。用于用户说“同步技能”“上传技能到云端”“备份 MCP 配置”时。',
+      '立即把本地技能、用户/项目记忆、MCP 配置同步到配置好的私有 git 仓库并推送。用户说“备份一下”“同步到云端”“把技能和记忆传上去”时使用。',
     parameters: {
-      repo: { type: 'string', enum: ['skills', 'mcp'], description: '只同步其中一个仓库；不传则两个都同步。' },
+      target: { type: 'string', enum: names, description: `只同步其中一个 target（${names.join(' / ')}）；不传则全部同步。` },
     },
     output: {
       schema: {
@@ -553,8 +547,6 @@ async function registerTools(ctx, cfg, log) {
         properties: {
           status: { type: 'string', required: true },
           summary: { type: 'string', required: true },
-          skills: { type: 'integer' },
-          mcp: { type: 'integer' },
           error: { type: 'string' },
         },
       },
@@ -565,23 +557,17 @@ async function registerTools(ctx, cfg, log) {
       },
     },
     async execute(args) {
+      const only = names.includes(args?.target) ? args.target : null
       const result = await guardedRun(cfg, 'manual', log)
-      const repo = args?.repo
-      const filtered = repo ? result.repos.filter((r) => r.kind === repo) : result.repos
-      const failed = filtered.find((r) => r.status === 'failed')
-      return {
-        status: failed ? 'failed' : result.status,
-        summary: summarize({ ...result, repos: filtered }),
-        skills: filtered.find((r) => r.kind === 'skills')?.count ?? 0,
-        mcp: filtered.find((r) => r.kind === 'mcp')?.count ?? 0,
-        error: failed?.error || '',
-      }
+      const picked = only ? result.targets.filter((t) => t.name === only) : result.targets
+      const failed = picked.find((t) => t.status === 'failed')
+      return { status: failed ? 'failed' : result.status, summary: summarize({ ...result, targets: picked }), error: failed?.error || '' }
     },
   })
 
   const statusTool = defineTool({
-    name: 'skill_sync_status',
-    description: '查看技能/MCP 同步的最近一次结果（时间、状态、错误）以及下次自动同步时间。',
+    name: 'vault_status',
+    description: '查看技能/记忆/配置同步的最近结果（时间、状态、错误）、各仓库地址以及下次自动同步时间。',
     parameters: {},
     output: {
       schema: {
@@ -593,14 +579,12 @@ async function registerTools(ctx, cfg, log) {
           lastRunAt: { type: 'string' },
           lastStatus: { type: 'string' },
           lastError: { type: 'string' },
-          skillsRepo: { type: 'string' },
-          mcpRepo: { type: 'string' },
+          targets: { type: 'array', items: { type: 'string' }, required: true },
         },
       },
       render: (_args, value) => {
         const lines = [
-          `技能仓库: ${value.skillsRepo || '未配置'}`,
-          `MCP 仓库: ${value.mcpRepo || '未配置'}`,
+          ...value.targets,
           `自动同步: ${value.enabled ? '开' : '关'}${value.nextRunAt ? ` (下次 ${value.nextRunAt})` : ''}`,
           `上次: ${value.lastStatus || '从未运行'}${value.lastRunAt ? ` @ ${value.lastRunAt}` : ''}`,
         ]
@@ -610,18 +594,15 @@ async function registerTools(ctx, cfg, log) {
     },
     async execute() {
       const state = readState() || {}
-      const anyConfigured = KINDS.some((kind) => cfg.repos[kind].url)
-      const nextRunAt = cfg.schedule.enabled && anyConfigured
-        ? new Date(Date.now() + msUntil(cfg.schedule.time)).toISOString()
-        : ''
+      const anyConfigured = cfg.targets.some((t) => t.repo.url)
+      const nextRunAt = cfg.schedule.enabled && anyConfigured ? new Date(Date.now() + msUntil(cfg.schedule.time)).toISOString() : ''
       return {
         enabled: cfg.schedule.enabled === true,
         nextRunAt,
         lastRunAt: state.lastRunAt || '',
         lastStatus: state.lastStatus || '',
         lastError: state.lastError || '',
-        skillsRepo: cfg.repos.skills.url ? displayUrl(cfg.repos.skills.url) : '',
-        mcpRepo: cfg.repos.mcp.url ? displayUrl(cfg.repos.mcp.url) : '',
+        targets: cfg.targets.map((t) => `${t.name}: ${t.repo.url ? displayUrl(t.repo.url) : '未配置'}`),
       }
     },
   })
@@ -630,7 +611,7 @@ async function registerTools(ctx, cfg, log) {
     try {
       ctx.tools.register(tool)
     } catch (err) {
-      console.warn(`[skill-sync] 注册工具 ${tool.name} 失败: ${err && err.message}`)
+      console.warn(`[vault] 注册工具 ${tool.name} 失败: ${err && err.message}`)
     }
   }
 }
@@ -638,12 +619,19 @@ async function registerTools(ctx, cfg, log) {
 export function apply(ctx, config) {
   let timer = null
   let stopped = false
-  const cfg = normalizeConfig(config || {})
-  const log = (message) => console.log(`[skill-sync] ${message}`)
+  let cfg
+  const log = (message) => console.log(`[vault] ${message}`)
+  try {
+    cfg = normalizeConfig(config || {})
+  } catch (err) {
+    // 配置写错不能把整个 Host 拖下水：只报错，不注册任何东西。
+    console.error(`[vault] 配置无效，插件未启用: ${err && err.message}`)
+    return
+  }
 
   const scheduleNext = () => {
     if (stopped || !cfg.schedule.enabled) return
-    if (!KINDS.some((kind) => cfg.repos[kind].url)) return
+    if (!cfg.targets.some((t) => t.repo.url)) return
     const delay = msUntil(cfg.schedule.time)
     timer = setTimeout(async () => {
       await guardedRun(cfg, 'schedule', log)
@@ -653,10 +641,10 @@ export function apply(ctx, config) {
     log(`定时同步已开启，每天 ${cfg.schedule.time}（下次 ${new Date(Date.now() + delay).toLocaleString()}）`)
   }
 
-  if (!KINDS.some((kind) => cfg.repos[kind].url)) log('仓库地址还没配，定时同步不启动（补上配置后重启生效）')
+  if (!cfg.targets.some((t) => t.repo.url)) log('仓库地址还没配，定时同步不启动（补上配置后重启生效）')
   else scheduleNext()
 
-  registerTools(ctx, cfg, log).catch((err) => console.warn(`[skill-sync] 工具注册跳过: ${err && err.message}`))
+  registerTools(ctx, cfg, log).catch((err) => console.warn(`[vault] 工具注册跳过: ${err && err.message}`))
 
   const stop = () => {
     stopped = true
@@ -685,20 +673,20 @@ function parseArgs(argv) {
 }
 
 function loadConfigFile(file) {
-  const target = file ? path.resolve(expandHome(file)) : path.join(process.cwd(), 'skill-sync.json')
+  const target = file ? path.resolve(expandHome(file)) : path.join(process.cwd(), 'vault.json')
   if (!fs.existsSync(target)) {
-    throw new Error(`找不到配置文件 ${target}（把 skill-sync.example.json 复制成 skill-sync.json 再改）`)
+    throw new Error(`找不到配置文件 ${target}（把 vault.example.json 复制成 vault.json 再改）`)
   }
   return JSON.parse(fs.readFileSync(target, 'utf8'))
 }
 
-const HELP = `dsh-skill-sync ${VERSION}
+const HELP = `dsh-vault ${VERSION}
 
 用法:
-  node index.js sync   --config skill-sync.json [--repo skills|mcp]   导出并 push
-  node index.js status --config skill-sync.json                       看上次结果与下次时间
+  node index.js sync   --config vault.json [--target skills|memory|mcp]   导出并 push
+  node index.js status --config vault.json                                看上次结果与下次时间
 
-配置字段见 README.md / skill-sync.example.json。
+配置字段见 README.md / vault.example.json。
 `
 
 export async function cli(argv) {
@@ -709,13 +697,13 @@ export async function cli(argv) {
     return
   }
   const cfg = normalizeConfig(loadConfigFile(args.flags.config))
-  const log = (message) => console.log(`[skill-sync] ${message}`)
+  const log = (message) => console.log(`[vault] ${message}`)
 
   if (cmd === 'status') {
     const state = readState() || {}
-    console.log(`技能仓库: ${cfg.repos.skills.url ? displayUrl(cfg.repos.skills.url) : '未配置'}`)
-    console.log(`MCP 仓库: ${cfg.repos.mcp.url ? displayUrl(cfg.repos.mcp.url) : '未配置'}`)
-    console.log(`克隆目录: ${cfg.repos.skills.workdir} / ${cfg.repos.mcp.workdir}`)
+    for (const target of cfg.targets) {
+      console.log(`${target.name}: ${target.repo.url ? displayUrl(target.repo.url) : '未配置'} -> ${target.repo.workdir}`)
+    }
     console.log(`自动同步: ${cfg.schedule.enabled ? `每天 ${cfg.schedule.time}` : '关'}`)
     console.log(`上次: ${state.lastStatus || '从未运行'}${state.lastRunAt ? ` @ ${state.lastRunAt}` : ''}`)
     if (state.lastError) console.log(`错误: ${state.lastError}`)
@@ -723,7 +711,7 @@ export async function cli(argv) {
   }
   if (cmd !== 'sync') throw new Error(`未知命令 ${cmd}（可用: sync / status）`)
 
-  const only = ['skills', 'mcp'].includes(args.flags.repo) ? args.flags.repo : null
+  const only = cfg.targets.some((t) => t.name === args.flags.target) ? args.flags.target : null
   const result = await syncAll(cfg, { log, only })
   await writeState({ lastRunAt: new Date().toISOString(), lastStatus: result.status, lastReason: 'cli', lastError: '' })
   console.log(summarize(result))
@@ -733,7 +721,7 @@ export async function cli(argv) {
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
 if (isMain) {
   cli(process.argv.slice(2)).catch((err) => {
-    console.error(`[skill-sync] ${err && err.code ? `[${err.code}] ` : ''}${err && err.message ? err.message : err}`)
+    console.error(`[vault] ${err && err.code ? `[${err.code}] ` : ''}${err && err.message ? err.message : err}`)
     process.exitCode = 1
   })
 }
