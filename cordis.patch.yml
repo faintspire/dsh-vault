@@ -1,0 +1,33 @@
+- insert:
+    - id: skill-sync
+      name: 'dsh-skill-sync'
+      config:
+        repos:
+          # 技能仓库：只放 skills/ 和 index.json。
+          skills:
+            url: 'git@github.com:faintspire/dsh-skills.git'
+            branch: 'main'
+            # 本地克隆目录：插件在这里 commit + push。
+            workdir: 'C:\Users\liuzk\.dsh\skill-sync\dsh-skills'
+            # 技能根目录，只同步含 SKILL.md 的直接子目录。
+            roots:
+              - 'C:\Users\liuzk\.dsh\skills'
+              - 'C:\Users\liuzk\.agents\skills'
+            # 仅当 url 是 https 时需要；留空读环境变量 DSH_SKILL_SYNC_TOKEN。
+            token: ''
+          # MCP 仓库：只放 mcp/ 和 index.json。
+          mcp:
+            url: 'git@github.com:faintspire/dsh-mcp.git'
+            branch: 'main'
+            workdir: 'C:\Users\liuzk\.dsh\skill-sync\dsh-mcp'
+            # 要备份的 MCP 配置文件（绝对路径）。填上就会开始同步。
+            files: []
+            token: ''
+        schedule:
+          enabled: true
+          # 24 小时制 HH:mm，每天这个点同步一次。
+          time: '03:30'
+        # block：发现疑似密钥就中止该仓库的推送；mask：替换成 [REDACTED:xxx] 后继续。
+        secretPolicy: 'block'
+        # 单文件上限，超过直接跳过（技能包正常不会碰到）。
+        maxFileBytes: 1048576

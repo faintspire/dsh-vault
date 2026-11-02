@@ -1,0 +1,55 @@
+{
+  "name": "dsh-skill-sync",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Sync DSH skills and MCP configs to private Git repositories — on a daily schedule or on demand.",
+  "type": "module",
+  "license": "MIT",
+  "author": "faintspire",
+  "homepage": "https://github.com/faintspire/dsh-skill-sync#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faintspire/dsh-skill-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/faintspire/dsh-skill-sync/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "skill",
+    "mcp",
+    "git",
+    "sync",
+    "backup"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "dsh-skill-sync": "./index.js"
+  },
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "skill-sync.example.json",
+    "scripts/",
+    "test/"
+  ],
+  "scripts": {
+    "test": "node test/verify.mjs",
+    "install-plugin": "node scripts/install.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

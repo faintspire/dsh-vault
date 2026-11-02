@@ -1,0 +1,21 @@
+{
+  "repos": {
+    "skills": {
+      "url": "git@github.com:faintspire/dsh-skills.git",
+      "branch": "main",
+      "workdir": "C:\\Users\\liuzk\\.dsh\\skill-sync\\dsh-skills",
+      "roots": ["C:\\Users\\liuzk\\.dsh\\skills", "C:\\Users\\liuzk\\.agents\\skills"]
+    },
+    "mcp": {
+      "url": "git@github.com:faintspire/dsh-mcp.git",
+      "branch": "main",
+      "workdir": "C:\\Users\\liuzk\\.dsh\\skill-sync\\dsh-mcp",
+      "files": []
+    }
+  },
+  "schedule": {
+    "enabled": true,
+    "time": "03:30"
+  },
+  "secretPolicy": "block"
+}
